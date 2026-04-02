@@ -54,7 +54,7 @@ function toItem(id: string, data: Record<string, unknown>): AlbumItem | null {
     viewUrl:
       kind === "video"
         ? `https://drive.google.com/file/d/${fileId}/preview`
-        : `https://drive.google.com/uc?export=view&id=${fileId}`,
+        : `/api/album/view?id=${encodeURIComponent(fileId)}`,
   };
 }
 

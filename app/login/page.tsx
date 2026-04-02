@@ -3,13 +3,24 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 
 import { auth } from "@/lib/firebase";
 
+/** Open redirect safe: same-origin path only. */
+function loginRedirectTarget(fromParam: string | null): string {
+  const raw = (fromParam ?? "").trim() || "/";
+  if (!raw.startsWith("/") || raw.startsWith("//")) {
+    return "/";
+  }
+  if (raw.startsWith("/login")) {
+    return "/";
+  }
+  return raw;
+}
+
 function LoginForms() {
-  const router = useRouter();
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const from = searchParams.get("from") || "/";
@@ -40,8 +51,10 @@ function LoginForms() {
         return;
       }
       await queryClient.refetchQueries({ queryKey: ["auth", "me"] });
-      const target = from.startsWith("/login") ? "/" : from;
-      router.replace(target);
+      const target = loginRedirectTarget(from);
+      // Full navigation so the next document request always includes the new
+      // session cookie (soft router.replace can race on Vercel / middleware).
+      window.location.assign(target);
     } catch {
       setMessage("Network error");
     } finally {
@@ -68,8 +81,8 @@ function LoginForms() {
         return;
       }
       await queryClient.refetchQueries({ queryKey: ["auth", "me"] });
-      const target = from.startsWith("/login") ? "/" : from;
-      router.replace(target);
+      const target = loginRedirectTarget(from);
+      window.location.assign(target);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Sign-in failed";
       setMessage(msg);

@@ -507,12 +507,15 @@ export function sanitizeDriveThumbnailSz(param: string | null): string | null {
 }
 
 /**
- * Fetches thumbnail bytes with the app’s Drive OAuth (browser hotlinks to
- * drive.google.com/thumbnail often fail for private files).
+ * Thumbnail bytes via `files.thumbnailLink` + credentialed fetch.
+ * (There is no supported `GET .../files/{id}/thumbnail` media URL on the v3 API;
+ * the old path returned 404 and broke the blur/grid pipeline with 502s.)
+ *
+ * `sz` is accepted for cache URLs only; Drive’s link is a single resolution.
  */
 export async function fetchDriveThumbnail(
   fileId: string,
-  sz: string
+  _sz: string
 ): Promise<
   { ok: true; buffer: Buffer; contentType: string } | { ok: false; status: number; code?: "no_thumbnail" }
 > {
@@ -521,15 +524,6 @@ export async function fetchDriveThumbnail(
   const token = access.token;
   if (!token) {
     return { ok: false, status: 503 };
-  }
-
-  const apiUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/thumbnail?sz=${encodeURIComponent(sz)}`;
-  const res = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
-
-  if (res.ok) {
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const contentType = res.headers.get("content-type") || "image/jpeg";
-    return { ok: true, buffer, contentType };
   }
 
   const drive = getDrive();
@@ -542,24 +536,61 @@ export async function fetchDriveThumbnail(
     });
     thumbnailLink = meta.data.thumbnailLink;
   } catch {
-    return { ok: false, status: res.status === 404 ? 404 : 502 };
+    return { ok: false, status: 404 };
   }
 
   if (!thumbnailLink) {
     return { ok: false, status: 404, code: "no_thumbnail" };
   }
 
-  try {
-    const fallback = await auth.request<ArrayBuffer>({
-      url: thumbnailLink,
-      responseType: "arraybuffer",
+  async function loadWithAuth(header: boolean): Promise<Response> {
+    return fetch(thumbnailLink!, {
+      redirect: "follow",
+      headers: header && token ? { Authorization: `Bearer ${token}` } : undefined,
     });
-    const body = fallback.data;
-    const buffer = Buffer.from(body);
-    const contentType = fallback.headers.get("content-type") || "image/jpeg";
+  }
+
+  try {
+    let thumbRes = await loadWithAuth(true);
+    if (!thumbRes.ok && (thumbRes.status === 401 || thumbRes.status === 403)) {
+      thumbRes = await loadWithAuth(false);
+    }
+    if (!thumbRes.ok) {
+      return { ok: false, status: thumbRes.status === 404 ? 404 : 502 };
+    }
+    const buffer = Buffer.from(await thumbRes.arrayBuffer());
+    const contentType = thumbRes.headers.get("content-type") || "image/jpeg";
     return { ok: true, buffer, contentType };
   } catch {
     return { ok: false, status: 502 };
+  }
+}
+
+export type DriveMediaStreamResult =
+  | { ok: true; stream: Readable; contentType: string }
+  | { ok: false; status: number };
+
+/** Stream raw file bytes (images in album lightbox). Not for Google Docs types. */
+export async function streamDriveFileMedia(fileId: string): Promise<DriveMediaStreamResult> {
+  const drive = getDrive();
+  try {
+    const res = await drive.files.get(
+      {
+        fileId,
+        alt: "media",
+        supportsAllDrives: true,
+        acknowledgeAbuse: true,
+      },
+      { responseType: "stream" }
+    );
+    const rawCt = res.headers["content-type"];
+    const contentType = Array.isArray(rawCt) ? rawCt[0] : rawCt || "application/octet-stream";
+    const stream = res.data as Readable;
+    return { ok: true, stream, contentType };
+  } catch (e: unknown) {
+    const err = e as { code?: number; response?: { status?: number } };
+    const status = err.response?.status ?? (typeof err.code === "number" ? err.code : 502);
+    return { ok: false, status: status >= 400 && status < 600 ? status : 502 };
   }
 }
 
