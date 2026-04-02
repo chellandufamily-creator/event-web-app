@@ -1,12 +1,10 @@
-import { Readable } from "stream";
-
 import { NextResponse } from "next/server";
 
 import { requireApiSession } from "@/lib/require-api-session";
 import {
+  fetchDriveFileMediaWebStream,
   isGoogleDriveConfigured,
   sanitizeDriveFileId,
-  streamDriveFileMedia,
 } from "@/services/googleDrive";
 
 export const runtime = "nodejs";
@@ -29,13 +27,12 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "View unavailable" }, { status: 503 });
   }
 
-  const result = await streamDriveFileMedia(fileId);
+  const result = await fetchDriveFileMediaWebStream(fileId);
   if (!result.ok) {
     return NextResponse.json({ error: "Could not load file" }, { status: result.status });
   }
 
-  const webStream = Readable.toWeb(result.stream);
-  return new NextResponse(webStream as unknown as BodyInit, {
+  return new NextResponse(result.body, {
     status: 200,
     headers: {
       "Content-Type": result.contentType,

@@ -1,21 +1,33 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 import type { AlbumItem } from "@/types/album";
+import type { AlbumPageResponse } from "@/types/album-api";
 import type { AuthSession } from "@/types/auth";
 
-async function fetchAlbum(): Promise<AlbumItem[]> {
-  const res = await fetch("/api/album", { credentials: "include" });
-  const json = (await res.json()) as { items?: AlbumItem[]; error?: string };
+const ALBUM_PAGE_SIZE = 24;
+
+async function fetchAlbumPage(cursor: string | null): Promise<AlbumPageResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(ALBUM_PAGE_SIZE));
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+  const res = await fetch(`/api/album?${params}`, { credentials: "include" });
+  const json = (await res.json()) as AlbumPageResponse & { error?: string };
   if (!res.ok) {
     throw new Error(json.error || "Could not load album");
   }
-  return json.items ?? [];
+  return {
+    items: json.items ?? [],
+    nextCursor: json.nextCursor ?? null,
+    hasMore: Boolean(json.hasMore),
+  };
 }
 
 async function fetchSession(): Promise<AuthSession | null> {
@@ -203,6 +215,189 @@ function MasonryGrid({
   );
 }
 
+function FilmStripTile({
+  item,
+  index,
+  onOpen,
+  reduceMotion,
+}: {
+  item: AlbumItem;
+  index: number;
+  onOpen: () => void;
+  reduceMotion: boolean | null;
+}) {
+  const [hiResLoaded, setHiResLoaded] = useState(false);
+  return (
+    <motion.button
+      type="button"
+      layout={!reduceMotion}
+      initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }}
+      whileInView={reduceMotion ? undefined : { opacity: 1, scale: 1 }}
+      viewport={{ once: true, margin: "60px" }}
+      transition={{ duration: reduceMotion ? 0 : 0.35, delay: Math.min(index * 0.02, 0.4) }}
+      onClick={onOpen}
+      className="group relative h-36 w-[108px] shrink-0 snap-start overflow-hidden rounded-xl bg-zinc-900 text-left shadow-lg ring-1 ring-white/10 transition hover:ring-amber-400/35 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/80 sm:h-40 sm:w-[120px]"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={item.blurThumbUrl}
+        alt=""
+        className="absolute inset-0 h-full w-full scale-110 object-cover blur-xl"
+        aria-hidden
+      />
+      {item.kind === "image" ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={item.thumbUrl}
+          alt={item.originalFilename}
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setHiResLoaded(true)}
+          className={cn(
+            "relative z-[1] h-full w-full object-cover transition-opacity duration-500",
+            hiResLoaded ? "opacity-100" : "opacity-0"
+          )}
+        />
+      ) : (
+        <div className="relative z-[1] flex h-full w-full items-center justify-center bg-zinc-950">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={item.thumbUrl}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            onLoad={() => setHiResLoaded(true)}
+            className={cn(
+              "h-full w-full object-cover transition-opacity duration-500",
+              hiResLoaded ? "opacity-100" : "opacity-0"
+            )}
+          />
+          <PlayBadge className="bottom-1.5 right-1.5 h-7 w-7 [&_svg]:h-3 [&_svg]:w-3" />
+        </div>
+      )}
+      {item.source === "camera" ? (
+        <span className="pointer-events-none absolute left-1.5 top-1.5 z-[2] rounded bg-violet-950/90 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wide text-violet-100">
+          Cam
+        </span>
+      ) : null}
+    </motion.button>
+  );
+}
+
+function FilmStrip({
+  items,
+  onOpen,
+  reduceMotion,
+  getGlobalIndex,
+  onLoadMore,
+  hasMore,
+  loadingMore,
+}: {
+  items: AlbumItem[];
+  onOpen: (globalIndex: number) => void;
+  reduceMotion: boolean | null;
+  getGlobalIndex: (localIndex: number) => number;
+  onLoadMore: () => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const root = scrollRef.current;
+    const sent = sentinelRef.current;
+    if (!root || !sent || !hasMore) {
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !loadingMore) {
+          onLoadMore();
+        }
+      },
+      { root, rootMargin: "320px 0px", threshold: 0.01 }
+    );
+    io.observe(sent);
+    return () => io.disconnect();
+  }, [hasMore, loadingMore, onLoadMore]);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-zinc-500">Scroll sideways — tap to open</p>
+      <div
+        ref={scrollRef}
+        className="-mx-1 flex gap-3 overflow-x-auto overflow-y-hidden px-1 pb-3 pt-1 [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/15"
+      >
+        {items.map((item, localI) => (
+          <FilmStripTile
+            key={item.id}
+            item={item}
+            index={localI}
+            onOpen={() => onOpen(getGlobalIndex(localI))}
+            reduceMotion={reduceMotion}
+          />
+        ))}
+        {hasMore ? (
+          <div
+            ref={sentinelRef}
+            className="flex h-36 w-24 shrink-0 items-center justify-center sm:h-40"
+            aria-hidden
+          >
+            {loadingMore ? <span className="text-xs text-zinc-500">…</span> : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function LoadMoreSentinel({
+  onLoadMore,
+  hasMore,
+  loadingMore,
+}: {
+  onLoadMore: () => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hasMore) {
+      return;
+    }
+    const el = ref.current;
+    if (!el) {
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !loadingMore) {
+          onLoadMore();
+        }
+      },
+      { root: null, rootMargin: "280px", threshold: 0 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasMore, loadingMore, onLoadMore]);
+
+  if (!hasMore) {
+    return null;
+  }
+
+  return (
+    <div ref={ref} className="flex min-h-16 justify-center py-10">
+      {loadingMore ? (
+        <span className="text-sm text-zinc-500">Loading more…</span>
+      ) : (
+        <span className="text-[11px] text-zinc-600">Scroll for more</span>
+      )}
+    </div>
+  );
+}
+
 function LightboxImageBody({ item }: { item: AlbumItem }) {
   const [loaded, setLoaded] = useState(false);
   return (
@@ -235,6 +430,7 @@ function Lightbox({
   onPrev,
   onNext,
   reduceMotion,
+  hasMorePages,
 }: {
   items: AlbumItem[];
   index: number;
@@ -242,6 +438,7 @@ function Lightbox({
   onPrev: () => void;
   onNext: () => void;
   reduceMotion: boolean | null;
+  hasMorePages: boolean;
 }) {
   const item = items[index];
   const touchStart = useRef<number | null>(null);
@@ -316,6 +513,7 @@ function Lightbox({
             {item.source === "camera" ? "Camera original · " : null}
             {item.uploaderName ? `${item.uploaderName} · ` : ""}
             {index + 1} / {items.length}
+            {hasMorePages ? " · more loading as you browse" : ""}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -382,6 +580,8 @@ function Lightbox({
   );
 }
 
+type AlbumViewMode = "timeline" | "gallery" | "filmstrip";
+
 export function AlbumExperience() {
   const reduceMotion = useReducedMotion();
   const { data: session, isPending: authPending } = useQuery({
@@ -390,13 +590,27 @@ export function AlbumExperience() {
     staleTime: 30_000,
   });
 
-  const { data: items = [], isPending, isError, error, refetch } = useQuery({
-    queryKey: ["album"],
-    queryFn: fetchAlbum,
+  const {
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isPending,
+    isError,
+    error,
+    refetch,
+  } = useInfiniteQuery({
+    queryKey: ["album", "infinite"],
+    queryFn: ({ pageParam }) => fetchAlbumPage(pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore && lastPage.nextCursor ? lastPage.nextCursor : undefined,
     staleTime: 45_000,
   });
 
-  const [view, setView] = useState<"timeline" | "continuous">("timeline");
+  const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
+
+  const [view, setView] = useState<AlbumViewMode>("filmstrip");
   const [sourceFilter, setSourceFilter] = useState<"all" | "camera" | "guest">("all");
   const [openIndex, setOpenIndex] = useState<number | null>(null);
 
@@ -453,6 +667,21 @@ export function AlbumExperience() {
     });
   }, [flatIndices.length]);
 
+  const loadMore = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage) {
+      void fetchNextPage();
+    }
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+  useEffect(() => {
+    if (openIndex == null || !hasNextPage || isFetchingNextPage) {
+      return;
+    }
+    if (openIndex >= flatIndices.length - 5) {
+      void fetchNextPage();
+    }
+  }, [openIndex, flatIndices.length, fetchNextPage, hasNextPage, isFetchingNextPage]);
+
   return (
     <div className="min-h-[calc(100vh-5rem)] bg-[#0c0c0e] text-zinc-200">
       <header className="border-b border-white/[0.06] bg-[#0c0c0e] px-4 py-5 sm:px-8">
@@ -463,30 +692,40 @@ export function AlbumExperience() {
               Moments
             </h1>
             <p className="mt-2 max-w-md text-sm leading-relaxed text-zinc-500">
-              Approved memories from our guests. Open any tile for fullscreen — swipe on your phone.
+              Photos load in batches as you scroll. Open any tile for fullscreen — swipe on your phone.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex rounded-full border border-white/10 bg-black/30 p-1">
+            <div className="flex flex-wrap rounded-full border border-white/10 bg-black/30 p-1">
+              <button
+                type="button"
+                onClick={() => setView("filmstrip")}
+                className={cn(
+                  "rounded-full px-3 py-2 text-xs font-medium transition sm:px-4",
+                  view === "filmstrip" ? "bg-amber-500/20 text-amber-200" : "text-zinc-500 hover:text-zinc-300"
+                )}
+              >
+                Film strip
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("gallery")}
+                className={cn(
+                  "rounded-full px-3 py-2 text-xs font-medium transition sm:px-4",
+                  view === "gallery" ? "bg-amber-500/20 text-amber-200" : "text-zinc-500 hover:text-zinc-300"
+                )}
+              >
+                Gallery
+              </button>
               <button
                 type="button"
                 onClick={() => setView("timeline")}
                 className={cn(
-                  "rounded-full px-4 py-2 text-xs font-medium transition",
+                  "rounded-full px-3 py-2 text-xs font-medium transition sm:px-4",
                   view === "timeline" ? "bg-amber-500/20 text-amber-200" : "text-zinc-500 hover:text-zinc-300"
                 )}
               >
                 Timeline
-              </button>
-              <button
-                type="button"
-                onClick={() => setView("continuous")}
-                className={cn(
-                  "rounded-full px-4 py-2 text-xs font-medium transition",
-                  view === "continuous" ? "bg-amber-500/20 text-amber-200" : "text-zinc-500 hover:text-zinc-300"
-                )}
-              >
-                Gallery
               </button>
             </div>
             <div className="flex flex-wrap rounded-full border border-white/10 bg-black/30 p-1">
@@ -567,17 +806,37 @@ export function AlbumExperience() {
           </div>
         ) : null}
 
-        {!isPending && !isError && view === "continuous" && displayItems.length > 0 ? (
-          <MasonryGrid
+        {!isPending && !isError && view === "filmstrip" && displayItems.length > 0 ? (
+          <FilmStrip
             items={displayItems}
             onOpen={openAt}
             reduceMotion={reduceMotion}
             getGlobalIndex={(localI) => localI}
+            onLoadMore={loadMore}
+            hasMore={Boolean(hasNextPage)}
+            loadingMore={isFetchingNextPage}
           />
         ) : null}
 
-        {!isPending && !isError && view === "timeline" && displayItems.length > 0
-          ? groups.map((g) => (
+        {!isPending && !isError && view === "gallery" && displayItems.length > 0 ? (
+          <>
+            <MasonryGrid
+              items={displayItems}
+              onOpen={openAt}
+              reduceMotion={reduceMotion}
+              getGlobalIndex={(localI) => localI}
+            />
+            <LoadMoreSentinel
+              onLoadMore={loadMore}
+              hasMore={Boolean(hasNextPage)}
+              loadingMore={isFetchingNextPage}
+            />
+          </>
+        ) : null}
+
+        {!isPending && !isError && view === "timeline" && displayItems.length > 0 ? (
+          <>
+            {groups.map((g) => (
               <section key={g.key} className="mb-14 last:mb-0">
                 <h2 className="sticky top-14 z-20 mb-6 inline-block rounded-full border border-white/10 bg-[#0c0c0e]/95 px-5 py-2 font-[family-name:var(--font-album-display)] text-lg font-light tracking-wide text-zinc-200 shadow-sm backdrop-blur-md">
                   {g.label}
@@ -589,8 +848,14 @@ export function AlbumExperience() {
                   getGlobalIndex={(localI) => resolveGlobalIndex(g.items, localI)}
                 />
               </section>
-            ))
-          : null}
+            ))}
+            <LoadMoreSentinel
+              onLoadMore={loadMore}
+              hasMore={Boolean(hasNextPage)}
+              loadingMore={isFetchingNextPage}
+            />
+          </>
+        ) : null}
       </main>
 
       <AnimatePresence>
@@ -602,6 +867,7 @@ export function AlbumExperience() {
             onPrev={goPrev}
             onNext={goNext}
             reduceMotion={reduceMotion}
+            hasMorePages={Boolean(hasNextPage)}
           />
         ) : null}
       </AnimatePresence>

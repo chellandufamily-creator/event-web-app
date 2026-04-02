@@ -506,12 +506,95 @@ export function sanitizeDriveThumbnailSz(param: string | null): string | null {
   return param;
 }
 
+/** Download file bytes via REST `alt=media`, aborting if body exceeds `maxBytes`. */
+async function fetchDriveMediaBufferCapped(
+  resolvedFileId: string,
+  maxBytes: number
+): Promise<{ ok: true; buffer: Buffer; contentType: string } | { ok: false }> {
+  const auth = getConfiguredOAuth2();
+  const access = await auth.getAccessToken();
+  const token = access.token;
+  if (!token) {
+    return { ok: false };
+  }
+
+  const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(resolvedFileId)}`);
+  url.searchParams.set("alt", "media");
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("acknowledgeAbuse", "true");
+
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+  } catch {
+    return { ok: false };
+  }
+  if (!res.ok) {
+    return { ok: false };
+  }
+
+  const declared = res.headers.get("content-length");
+  if (declared && Number(declared) > maxBytes) {
+    return { ok: false };
+  }
+
+  if (!res.body) {
+    return { ok: false };
+  }
+
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value?.byteLength) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          return { ok: false };
+        }
+        chunks.push(Buffer.from(value));
+      }
+    }
+  } catch {
+    return { ok: false };
+  }
+
+  const buffer = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks);
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  return { ok: true, buffer, contentType };
+}
+
+/** Follow Drive shortcuts to the target file used for media / thumbnails. */
+async function resolveDriveFileTargetId(startId: string): Promise<string | null> {
+  const drive = getDrive();
+  let id = startId;
+  for (let depth = 0; depth < 6; depth++) {
+    try {
+      const g = await drive.files.get({
+        fileId: id,
+        fields: "mimeType,shortcutDetails",
+        supportsAllDrives: true,
+      });
+      if (g.data.mimeType === SHORTCUT_MIME && g.data.shortcutDetails?.targetId) {
+        id = g.data.shortcutDetails.targetId;
+        continue;
+      }
+      return id;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /**
- * Thumbnail bytes via `files.thumbnailLink` + credentialed fetch.
- * (There is no supported `GET .../files/{id}/thumbnail` media URL on the v3 API;
- * the old path returned 404 and broke the blur/grid pipeline with 502s.)
- *
- * `sz` is accepted for cache URLs only; Drive’s link is a single resolution.
+ * Thumbnail bytes via `files.thumbnailLink` + fetch (signed URLs often work
+ * without Authorization; otherwise Bearer). `sz` is cache-key only.
  */
 export async function fetchDriveThumbnail(
   fileId: string,
@@ -526,11 +609,16 @@ export async function fetchDriveThumbnail(
     return { ok: false, status: 503 };
   }
 
+  const resolved = await resolveDriveFileTargetId(fileId);
+  if (!resolved) {
+    return { ok: false, status: 404 };
+  }
+
   const drive = getDrive();
   let thumbnailLink: string | null | undefined;
   try {
     const meta = await drive.files.get({
-      fileId,
+      fileId: resolved,
       fields: "thumbnailLink",
       supportsAllDrives: true,
     });
@@ -540,20 +628,24 @@ export async function fetchDriveThumbnail(
   }
 
   if (!thumbnailLink) {
+    const fallback = await fetchDriveMediaBufferCapped(resolved, 12 * 1024 * 1024);
+    if (fallback.ok) {
+      return { ok: true, buffer: fallback.buffer, contentType: fallback.contentType };
+    }
     return { ok: false, status: 404, code: "no_thumbnail" };
   }
 
-  async function loadWithAuth(header: boolean): Promise<Response> {
+  async function loadThumb(useBearer: boolean): Promise<Response> {
     return fetch(thumbnailLink!, {
       redirect: "follow",
-      headers: header && token ? { Authorization: `Bearer ${token}` } : undefined,
+      headers: useBearer && token ? { Authorization: `Bearer ${token}` } : {},
     });
   }
 
   try {
-    let thumbRes = await loadWithAuth(true);
+    let thumbRes = await loadThumb(false);
     if (!thumbRes.ok && (thumbRes.status === 401 || thumbRes.status === 403)) {
-      thumbRes = await loadWithAuth(false);
+      thumbRes = await loadThumb(true);
     }
     if (!thumbRes.ok) {
       return { ok: false, status: thumbRes.status === 404 ? 404 : 502 };
@@ -566,31 +658,45 @@ export async function fetchDriveThumbnail(
   }
 }
 
-export type DriveMediaStreamResult =
-  | { ok: true; stream: Readable; contentType: string }
+export type DriveMediaFetchResult =
+  | { ok: true; body: ReadableStream<Uint8Array>; contentType: string }
   | { ok: false; status: number };
 
-/** Stream raw file bytes (images in album lightbox). Not for Google Docs types. */
-export async function streamDriveFileMedia(fileId: string): Promise<DriveMediaStreamResult> {
-  const drive = getDrive();
+/**
+ * Full file bytes for images (lightbox). Uses native `fetch` to the Drive v3
+ * REST URL so the body is a real Web ReadableStream — googleapis + Readable.toWeb
+ * often yields empty bodies on Vercel serverless.
+ */
+export async function fetchDriveFileMediaWebStream(fileId: string): Promise<DriveMediaFetchResult> {
+  const resolved = await resolveDriveFileTargetId(fileId);
+  if (!resolved) {
+    return { ok: false, status: 404 };
+  }
+
+  const auth = getConfiguredOAuth2();
+  const access = await auth.getAccessToken();
+  const token = access.token;
+  if (!token) {
+    return { ok: false, status: 503 };
+  }
+
+  const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(resolved)}`);
+  url.searchParams.set("alt", "media");
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("acknowledgeAbuse", "true");
+
   try {
-    const res = await drive.files.get(
-      {
-        fileId,
-        alt: "media",
-        supportsAllDrives: true,
-        acknowledgeAbuse: true,
-      },
-      { responseType: "stream" }
-    );
-    const rawCt = res.headers["content-type"];
-    const contentType = Array.isArray(rawCt) ? rawCt[0] : rawCt || "application/octet-stream";
-    const stream = res.data as Readable;
-    return { ok: true, stream, contentType };
-  } catch (e: unknown) {
-    const err = e as { code?: number; response?: { status?: number } };
-    const status = err.response?.status ?? (typeof err.code === "number" ? err.code : 502);
-    return { ok: false, status: status >= 400 && status < 600 ? status : 502 };
+    const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      return { ok: false, status: res.status };
+    }
+    if (!res.body) {
+      return { ok: false, status: 502 };
+    }
+    const contentType = res.headers.get("content-type") || "application/octet-stream";
+    return { ok: true, body: res.body, contentType };
+  } catch {
+    return { ok: false, status: 502 };
   }
 }
 
