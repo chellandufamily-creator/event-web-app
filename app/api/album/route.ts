@@ -49,8 +49,8 @@ function toItem(id: string, data: Record<string, unknown>): AlbumItem | null {
     source,
     createdAt,
     kind,
-    thumbUrl: `https://drive.google.com/thumbnail?id=${fileId}&sz=w640`,
-    blurThumbUrl: `https://drive.google.com/thumbnail?id=${fileId}&sz=w40`,
+    thumbUrl: `/api/album/thumbnail?id=${encodeURIComponent(fileId)}&sz=w640`,
+    blurThumbUrl: `/api/album/thumbnail?id=${encodeURIComponent(fileId)}&sz=w40`,
     viewUrl:
       kind === "video"
         ? `https://drive.google.com/file/d/${fileId}/preview`

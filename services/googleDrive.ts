@@ -485,6 +485,84 @@ export async function getOrEnsureDriveLayout(): Promise<DriveLayoutIds> {
   return ensureDriveLayoutOnStartup();
 }
 
+const THUMB_SZ_RE = /^w([1-9]\d{1,3})$/;
+
+export function sanitizeDriveFileId(id: string | null): string | null {
+  if (!id || id.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    return null;
+  }
+  return id;
+}
+
+/** `sz` for Drive thumbnails (e.g. w40, w640); max width 2000 per API. */
+export function sanitizeDriveThumbnailSz(param: string | null): string | null {
+  if (!param || !THUMB_SZ_RE.test(param)) {
+    return null;
+  }
+  const w = Number.parseInt(param.slice(1), 10);
+  if (w < 10 || w > 2000) {
+    return null;
+  }
+  return param;
+}
+
+/**
+ * Fetches thumbnail bytes with the app’s Drive OAuth (browser hotlinks to
+ * drive.google.com/thumbnail often fail for private files).
+ */
+export async function fetchDriveThumbnail(
+  fileId: string,
+  sz: string
+): Promise<
+  { ok: true; buffer: Buffer; contentType: string } | { ok: false; status: number; code?: "no_thumbnail" }
+> {
+  const auth = getConfiguredOAuth2();
+  const access = await auth.getAccessToken();
+  const token = access.token;
+  if (!token) {
+    return { ok: false, status: 503 };
+  }
+
+  const apiUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/thumbnail?sz=${encodeURIComponent(sz)}`;
+  const res = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
+
+  if (res.ok) {
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const contentType = res.headers.get("content-type") || "image/jpeg";
+    return { ok: true, buffer, contentType };
+  }
+
+  const drive = getDrive();
+  let thumbnailLink: string | null | undefined;
+  try {
+    const meta = await drive.files.get({
+      fileId,
+      fields: "thumbnailLink",
+      supportsAllDrives: true,
+    });
+    thumbnailLink = meta.data.thumbnailLink;
+  } catch {
+    return { ok: false, status: res.status === 404 ? 404 : 502 };
+  }
+
+  if (!thumbnailLink) {
+    return { ok: false, status: 404, code: "no_thumbnail" };
+  }
+
+  try {
+    const fallback = await auth.request<ArrayBuffer>({
+      url: thumbnailLink,
+      responseType: "arraybuffer",
+    });
+    const body = fallback.data;
+    const buffer = Buffer.from(body);
+    const contentType = fallback.headers.get("content-type") || "image/jpeg";
+    return { ok: true, buffer, contentType };
+  } catch {
+    return { ok: false, status: 502 };
+  }
+}
+
 /** Test-only: inject a mock Drive client (or null to restore real OAuth client). */
 export function setGoogleDriveClientForTests(client: drive_v3.Drive | null): void {
   clientOverride = client;

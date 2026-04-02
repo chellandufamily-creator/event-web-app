@@ -39,9 +39,9 @@ function LoginForms() {
         setMessage(data.error || "Code login failed");
         return;
       }
-      await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
-      router.push(from.startsWith("/login") ? "/" : from);
-      router.refresh();
+      await queryClient.refetchQueries({ queryKey: ["auth", "me"] });
+      const target = from.startsWith("/login") ? "/" : from;
+      router.replace(target);
     } catch {
       setMessage("Network error");
     } finally {
@@ -67,9 +67,9 @@ function LoginForms() {
         setMessage(data.error || "Email login failed");
         return;
       }
-      await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
-      router.push(from.startsWith("/login") ? "/" : from);
-      router.refresh();
+      await queryClient.refetchQueries({ queryKey: ["auth", "me"] });
+      const target = from.startsWith("/login") ? "/" : from;
+      router.replace(target);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Sign-in failed";
       setMessage(msg);

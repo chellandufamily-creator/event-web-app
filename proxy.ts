@@ -16,7 +16,7 @@ export async function proxy(request: NextRequest) {
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const session = token ? await verifySessionToken(token) : null;
 
-  if (pathname === "/api/album") {
+  if (pathname === "/api/album" || pathname === "/api/album/thumbnail") {
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -107,6 +107,7 @@ export const config = {
   matcher: [
     "/",
     "/api/album",
+    "/api/album/thumbnail",
     "/admin/:path*",
     "/review/:path*",
     "/upload/:path*",
