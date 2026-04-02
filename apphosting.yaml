@@ -1,0 +1,20 @@
+# Firebase App Hosting — https://firebase.google.com/docs/app-hosting/configure
+# Set secrets in Cloud Secret Manager, then reference them here (do not commit real values).
+# Or add env vars in Firebase console → App Hosting → your backend → Settings → Environment.
+
+runConfig:
+  cpu: 1
+  memoryMiB: 1024
+  concurrency: 80
+
+# Example (uncomment after creating secrets with: firebase apphosting:secrets:set SECRET_NAME)
+# env:
+#   - variable: SESSION_SECRET
+#     secret: SESSION_SECRET
+#     availability: [BUILD, RUNTIME]
+#   - variable: FIREBASE_SERVICE_ACCOUNT_JSON
+#     secret: FIREBASE_SERVICE_ACCOUNT_JSON
+#     availability: [RUNTIME]
+#   - variable: GOOGLE_DRIVE_REFRESH_TOKEN
+#     secret: GOOGLE_DRIVE_REFRESH_TOKEN
+#     availability: [RUNTIME]
